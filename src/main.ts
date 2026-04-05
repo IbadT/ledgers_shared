@@ -9,6 +9,8 @@ async function bootstrap() {
 
   const configService = app.get(ConfigService);
 
+  app.setGlobalPrefix('api');
+
   app.connectMicroservice<MicroserviceOptions>({
     transport: Transport.RMQ,
     options: {
@@ -18,7 +20,7 @@ async function bootstrap() {
       ],
       exchange: 'shared.exchange',
       exchangeType: 'topic',
-      queue: 'orchestrator_queue',
+      queue: 'shared_queue',
       queueOptions: {
         durable: true,
       },
@@ -35,10 +37,10 @@ async function bootstrap() {
   const document = SwaggerModule.createDocument(app, config);
   SwaggerModule.setup('api/docs', app, document);
 
-  const port = configService.get('PORT');
+  const port = configService.getOrThrow<number>('PORT');
 
   await app.startAllMicroservices();
-  await app.listen(port ?? 4000);
+  await app.listen(port);
 
   console.log(`
 ╔═════════════════════════════════════════════════════════════╗
