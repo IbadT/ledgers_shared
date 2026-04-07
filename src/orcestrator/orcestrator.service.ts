@@ -4,7 +4,6 @@ import { PrismaService } from '../prisma/prisma.service';
 import { GenerateStatementDto } from './dto/generate-statemtnt.dto';
 import { JobStatus } from '../../prisma/generated/enums';
 import { AppLogger } from '../shared/logger.service';
-// import { JobStatus } from '../generated/prisma/enums';
 
 @Injectable()
 export class OrcestratorService {

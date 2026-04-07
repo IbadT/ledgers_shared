@@ -125,4 +125,104 @@ export class OrcestratorController {
     channel.ack(message);
     return result;
   }
+
+  @MessagePattern('statement.status')
+  async handleStatementStatus(
+    @Payload() data: { operationId: string },
+    @Ctx() context: RmqContext,
+  ) {
+    this.logger.log(
+      `RabbitMQ message received: statement.status, operationId=${data.operationId}`,
+      'ORCESTRATOR',
+    );
+    const result = await this.orcestratorService.getStatus(data.operationId);
+    this.logger.log(
+      `RabbitMQ message processed: status=${result.status}`,
+      'ORCESTRATOR',
+    );
+    const channel = context.getChannelRef();
+    const message = context.getMessage();
+    channel.ack(message);
+    return result;
+  }
+
+  @MessagePattern('statement.result')
+  async handleStatementResult(
+    @Payload() data: { operationId: string },
+    @Ctx() context: RmqContext,
+  ) {
+    this.logger.log(
+      `RabbitMQ message received: statement.result, operationId=${data.operationId}`,
+      'ORCESTRATOR',
+    );
+    const result = await this.orcestratorService.getResult(data.operationId);
+    this.logger.log(
+      `RabbitMQ message processed: hasData=${!!result}`,
+      'ORCESTRATOR',
+    );
+    const channel = context.getChannelRef();
+    const message = context.getMessage();
+    channel.ack(message);
+    return result;
+  }
+
+  @MessagePattern('statement.cancel')
+  async handleStatementCancel(
+    @Payload() data: { operationId: string },
+    @Ctx() context: RmqContext,
+  ) {
+    this.logger.log(
+      `RabbitMQ message received: statement.cancel, operationId=${data.operationId}`,
+      'ORCESTRATOR',
+    );
+    const result = await this.orcestratorService.cancel(data.operationId);
+    this.logger.log(
+      `RabbitMQ message processed: removed=${result.removed}`,
+      'ORCESTRATOR',
+    );
+    const channel = context.getChannelRef();
+    const message = context.getMessage();
+    channel.ack(message);
+    return result;
+  }
+
+  @MessagePattern('statement.retry')
+  async handleStatementRetry(
+    @Payload() data: { operationId: string },
+    @Ctx() context: RmqContext,
+  ) {
+    this.logger.log(
+      `RabbitMQ message received: statement.retry, operationId=${data.operationId}`,
+      'ORCESTRATOR',
+    );
+    const result = await this.orcestratorService.retry(data.operationId);
+    this.logger.log(
+      `RabbitMQ message processed: retried=${result.retried}`,
+      'ORCESTRATOR',
+    );
+    const channel = context.getChannelRef();
+    const message = context.getMessage();
+    channel.ack(message);
+    return result;
+  }
+
+  @MessagePattern('statement.metrics')
+  async handleStatementMetrics(
+    @Payload() data: { queueName: 'statement-generation' | 'matematika-calls' | 'maska-calls' },
+    @Ctx() context: RmqContext,
+  ) {
+    this.logger.log(
+      `RabbitMQ message received: statement.metrics, queue=${data.queueName}`,
+      'ORCESTRATOR',
+    );
+    const result = await this.orcestratorService.getMetrics(data.queueName);
+    this.logger.log(
+      `RabbitMQ message processed: waiting=${result.waiting}, active=${result.active}`,
+      'ORCESTRATOR',
+    );
+    const channel = context.getChannelRef();
+    const message = context.getMessage();
+    channel.ack(message);
+    return result;
+  }
 }

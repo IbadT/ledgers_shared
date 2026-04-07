@@ -1,5 +1,3 @@
-// src/modules/counterparty/counterparty.service.ts
-
 import { Injectable } from '@nestjs/common';
 import { AvailableCounterparty, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';

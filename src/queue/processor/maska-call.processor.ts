@@ -1,5 +1,3 @@
-// src/modules/queue/processors/maska-call.processor.ts
-
 import { Processor, WorkerHost, OnWorkerEvent } from '@nestjs/bullmq';
 import { Job } from 'bullmq';
 import { Injectable } from '@nestjs/common';

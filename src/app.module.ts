@@ -1,6 +1,4 @@
 import { Module } from '@nestjs/common';
-import { AppController } from './app.controller';
-import { AppService } from './app.service';
 import { ConfigModule } from '@nestjs/config';
 import { OrcestratorModule } from './orcestrator/orcestrator.module';
 import { BalanceModule } from './balance/balance.module';
@@ -23,7 +21,5 @@ import redisConfig from './config/redis.config';
     CounterpartyModule,
     DateCalculationModule,
   ],
-  controllers: [AppController],
-  providers: [AppService],
 })
 export class AppModule {}

@@ -1,5 +1,3 @@
-// src/modules/queue/queue.module.ts
-
 import { Module, Global } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
 import { ConfigModule, ConfigService } from '@nestjs/config';
@@ -10,8 +8,6 @@ import { MaskaCallProcessor } from './processor/maska-call.processor';
 import { MatematikaCallProcessor } from './processor/matematika-call.processor';
 import { MonthGenerationProcessor } from './processor/month-generation.processor';
 import { PrismaService } from '../prisma/prisma.service';
-import { CounterpartyService } from '../counterparty/counterparty.service';
-import { DateCalculationService } from '../date-calculation/date-calculation.service';
 import { CounterpartyModule } from '../counterparty/counterparty.module';
 import { BalanceModule } from '../balance/balance.module';
 import { DateCalculationModule } from '../date-calculation/date-calculation.module';
@@ -64,8 +60,6 @@ import { DateCalculationModule } from '../date-calculation/date-calculation.modu
     MonthGenerationProcessor,
     MatematikaCallProcessor,
     MaskaCallProcessor,
-    // CounterpartyService,
-    // DateCalculationService,
     PrismaService
   ],
   exports: [QueueService, BullModule],

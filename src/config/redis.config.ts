@@ -1,5 +1,3 @@
-// src/config/redis.config.ts
-
 import { registerAs } from '@nestjs/config';
 
 export interface RedisConfig {

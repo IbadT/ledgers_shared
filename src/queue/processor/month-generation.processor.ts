@@ -1,5 +1,3 @@
-// src/modules/queue/processors/month-generation.processor.ts
-
 import { Processor, WorkerHost, OnWorkerEvent } from '@nestjs/bullmq';
 import { Job, QueueEvents } from 'bullmq';
 import { Injectable } from '@nestjs/common';
@@ -9,8 +7,6 @@ import { DateCalculationService } from '../../date-calculation/date-calculation.
 import { BalanceService } from '../../balance/balance.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AppLogger } from '../../shared/logger.service';
-// import { PrismaService } from '../../prisma/prisma.service';
-// import type { PrismaService } from '../../../shared/prisma/prisma.service';
 
 interface MonthResult {
   period: string;
