@@ -9,10 +9,19 @@ import { RedisConfig } from '../config/redis.config';
 import { MaskaCallProcessor } from './processor/maska-call.processor';
 import { MatematikaCallProcessor } from './processor/matematika-call.processor';
 import { MonthGenerationProcessor } from './processor/month-generation.processor';
+import { PrismaService } from '../prisma/prisma.service';
+import { CounterpartyService } from '../counterparty/counterparty.service';
+import { DateCalculationService } from '../date-calculation/date-calculation.service';
+import { CounterpartyModule } from '../counterparty/counterparty.module';
+import { BalanceModule } from '../balance/balance.module';
+import { DateCalculationModule } from '../date-calculation/date-calculation.module';
 
 @Global()
 @Module({
   imports: [
+    CounterpartyModule,
+    BalanceModule,
+    DateCalculationModule,
     HttpModule,
     BullModule.forRootAsync({
       imports: [ConfigModule],
@@ -55,6 +64,9 @@ import { MonthGenerationProcessor } from './processor/month-generation.processor
     MonthGenerationProcessor,
     MatematikaCallProcessor,
     MaskaCallProcessor,
+    // CounterpartyService,
+    // DateCalculationService,
+    PrismaService
   ],
   exports: [QueueService, BullModule],
 })

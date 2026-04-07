@@ -1,10 +1,9 @@
 // src/modules/counterparty/counterparty.service.ts
 
 import { Injectable } from '@nestjs/common';
-import { AvailableCounterparty, Prisma } from '../generated/prisma/client';
+import { AvailableCounterparty, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-// import type { PrismaService } from '../../shared/prisma/prisma.service';
-// import type { Prisma } from '@prisma/client';
+import { AppLogger } from '../shared/logger.service';
 
 interface CounterpartySelection {
   name: string;
@@ -26,10 +25,6 @@ interface SelectionConfig {
   };
 }
 
-// Тип для создания истории использования
-type CounterpartyUsageHistoryCreateInput =
-  Prisma.CounterpartyUsageHistoryCreateInput;
-
 @Injectable()
 export class CounterpartyService {
   private readonly CLIENT_REPEAT_RATE = 0.6;
@@ -37,7 +32,10 @@ export class CounterpartyService {
   private readonly CONTRACTOR_REPEAT_RATE = 0.7;
   private readonly CONTRACTOR_VARIATION = 0.1;
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly logger: AppLogger,
+  ) {}
 
   async selectForMonth(
     companyId: string,
@@ -45,9 +43,17 @@ export class CounterpartyService {
     monthIndex: number,
     previousPeriod?: string,
   ): Promise<CounterpartySelection[]> {
+    this.logger.log(
+      `[selectForMonth] Selecting counterparties: companyId=${companyId}, period=${period}, monthIndex=${monthIndex}`,
+      'COUNTERPARTY',
+    );
     const config = await this.getSelectionConfig(companyId);
     const selected: CounterpartySelection[] = [];
 
+    this.logger.debug(
+      `[selectForMonth] Selecting clients: targetCount=${config.clients.targetCount}`,
+      'COUNTERPARTY',
+    );
     const clients = await this.selectByType(
       companyId,
       'client',
@@ -56,7 +62,12 @@ export class CounterpartyService {
       monthIndex,
     );
     selected.push(...clients);
+    this.logger.debug(`[selectForMonth] Selected ${clients.length} clients`, 'COUNTERPARTY');
 
+    this.logger.debug(
+      `[selectForMonth] Selecting contractors: targetCount=${config.contractors.targetCount}`,
+      'COUNTERPARTY',
+    );
     const contractors = await this.selectByType(
       companyId,
       'contractor',
@@ -65,9 +76,14 @@ export class CounterpartyService {
       monthIndex,
     );
     selected.push(...contractors);
+    this.logger.debug(`[selectForMonth] Selected ${contractors.length} contractors`, 'COUNTERPARTY');
 
     await this.saveSelection(companyId, period, selected);
 
+    this.logger.log(
+      `[selectForMonth] Completed: companyId=${companyId}, period=${period}, totalSelected=${selected.length}`,
+      'COUNTERPARTY',
+    );
     return selected;
   }
 
@@ -267,9 +283,9 @@ export class CounterpartyService {
       'contractor',
     );
 
-    const clientHistoryData: CounterpartyUsageHistoryCreateInput = {
+    const clientHistoryData = {
       companyId,
-      type: 'CLIENT',
+      type: 'CLIENT' as const,
       period,
       usedNames: clients.map((c) => c.name),
       newNames: clients
@@ -280,9 +296,9 @@ export class CounterpartyService {
         .map((c) => ({ category: c.category, counterparty: c.name })),
     };
 
-    const contractorHistoryData: CounterpartyUsageHistoryCreateInput = {
+    const contractorHistoryData = {
       companyId,
-      type: 'CONTRACTOR',
+      type: 'CONTRACTOR' as const,
       period,
       usedNames: contractors.map((c) => c.name),
       newNames: contractors
@@ -328,6 +344,10 @@ export class CounterpartyService {
     counterpartyName: string,
     period: string,
   ): Promise<void> {
+    this.logger.log(
+      `[establishGreenCategory] Establishing green category: companyId=${companyId}, category=${category}, counterparty=${counterpartyName}`,
+      'COUNTERPARTY',
+    );
     await this.prisma.greenCategoryAssignment.upsert({
       where: {
         companyId_category: {
@@ -347,6 +367,10 @@ export class CounterpartyService {
         isActive: true,
       },
     });
+    this.logger.log(
+      `[establishGreenCategory] Green category established: ${category} -> ${counterpartyName}`,
+      'COUNTERPARTY',
+    );
   }
 
   private async getSelectionConfig(

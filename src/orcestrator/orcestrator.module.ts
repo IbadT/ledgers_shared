@@ -3,7 +3,7 @@ import { ClientsModule, Transport } from '@nestjs/microservices';
 import { OrcestratorController } from './orcestrator.controller';
 import { OrcestratorService } from './orcestrator.service';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import { QueueService } from '../queue/queue.service';
+import { PrismaService } from '../prisma/prisma.service';
 import { QueueModule } from '../queue/queue.module';
 
 @Module({
@@ -26,6 +26,6 @@ import { QueueModule } from '../queue/queue.module';
     ]),
   ],
   controllers: [OrcestratorController],
-  providers: [OrcestratorService],
+  providers: [OrcestratorService, PrismaService],
 })
 export class OrcestratorModule {}

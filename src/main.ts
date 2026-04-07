@@ -3,11 +3,18 @@ import { AppModule } from './app.module';
 import { MicroserviceOptions, Transport } from '@nestjs/microservices';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
+import { AppLogger } from './shared/logger.service';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
+  const logger = app.get(AppLogger);
+  app.useLogger(logger);
+
   const configService = app.get(ConfigService);
+
+  logger.log('Starting Shared Microservice...', 'APP');
+  logger.log(`RabbitMQ URI: ${configService.get('RABBITMQ_URI')}`, 'APP');
 
   app.setGlobalPrefix('api');
 
@@ -15,7 +22,6 @@ async function bootstrap() {
     transport: Transport.RMQ,
     options: {
       urls: [
-        // `amqp://${configService.get('RABBITMQ_USER')}:${configService.get('RABBITMQ_PASS')}@${configService.get('RABBITMQ_HOST')}:${configService.get('RABBITMQ_PORT')}`,
         configService.getOrThrow<string>('RABBITMQ_URI'),
       ],
       exchange: 'shared.exchange',
@@ -24,7 +30,7 @@ async function bootstrap() {
       queueOptions: {
         durable: true,
       },
-      noAck: false, // ручное подтверждение
+      noAck: false,
     },
   });
 
@@ -40,7 +46,10 @@ async function bootstrap() {
   const port = configService.getOrThrow<number>('PORT');
 
   await app.startAllMicroservices();
+  logger.log('RabbitMQ microservice started', 'APP');
+  
   await app.listen(port);
+  logger.log(`HTTP server listening on port ${port}`, 'APP');
 
   console.log(`
 ╔═════════════════════════════════════════════════════════════╗

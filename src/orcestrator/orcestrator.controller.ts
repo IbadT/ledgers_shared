@@ -1,112 +1,128 @@
-import { Body, Controller, Inject, Post } from '@nestjs/common';
 import {
-  ClientProxy,
-  Ctx,
-  MessagePattern,
-  Payload,
-  RmqContext,
-} from '@nestjs/microservices';
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Inject,
+  Param,
+  Post,
+} from '@nestjs/common';
+import { ClientProxy, Ctx, MessagePattern, Payload, RmqContext } from '@nestjs/microservices';
+import { OrcestratorService } from './orcestrator.service';
+import { GenerateStatementDto } from './dto/generate-statemtnt.dto';
+import { AppLogger } from '../shared/logger.service';
 
 @Controller('orcestrator')
 export class OrcestratorController {
   constructor(
     @Inject('SHARED_SERVICE') private readonly sharedClient: ClientProxy,
+    private readonly orcestratorService: OrcestratorService,
+    private readonly logger: AppLogger,
   ) {}
 
-  // ✅ Отправка
-  @Post('send-user')
-  async sendUser() {
-    const userData = { name: 'Eduard', age: 24 };
-    console.log(`📤 Sending:`, userData);
-    return await this.sharedClient.send('user.process', userData).toPromise();
+  // HTTP endpoints
+  @Post('generate')
+  @HttpCode(HttpStatus.ACCEPTED)
+  async generate(@Body() dto: GenerateStatementDto): Promise<{
+    operationId: string;
+    status: string;
+    message: string;
+  }> {
+    this.logger.log(
+      `Generate request: company=${dto.companyId}, months=${dto.monthsCount}`,
+      'ORCESTRATOR',
+    );
+    const result = await this.orcestratorService.generate(dto);
+    this.logger.log(
+      `Generate accepted: operationId=${result.operationId}, status=${result.status}`,
+      'ORCESTRATOR',
+    );
+    return result;
   }
 
-  // ✅ Получение (только это и нужно)
-  @MessagePattern('user.process')
-  async handleUserProcess(
-    @Payload() user: { name: string; age: number },
+  @Get('status/:operationId')
+  async getStatus(@Param('operationId') operationId: string) {
+    this.logger.log(`Get status request: operationId=${operationId}`, 'ORCESTRATOR');
+    const result = await this.orcestratorService.getStatus(operationId);
+    this.logger.log(
+      `Status response: operationId=${operationId}, status=${result.status}`,
+      'ORCESTRATOR',
+    );
+    return result;
+  }
+
+  @Post('cancel/:operationId')
+  @HttpCode(HttpStatus.OK)
+  async cancel(
+    @Param('operationId') operationId: string,
+  ): Promise<{ removed: number; errors: string[] }> {
+    this.logger.log(`Cancel request: operationId=${operationId}`, 'ORCESTRATOR');
+    const result = await this.orcestratorService.cancel(operationId);
+    this.logger.log(
+      `Cancel completed: operationId=${operationId}, removed=${result.removed}`,
+      'ORCESTRATOR',
+    );
+    return result;
+  }
+
+  @Post('retry/:operationId')
+  @HttpCode(HttpStatus.OK)
+  async retry(
+    @Param('operationId') operationId: string,
+  ): Promise<{ retried: number }> {
+    this.logger.log(`Retry request: operationId=${operationId}`, 'ORCESTRATOR');
+    const result = await this.orcestratorService.retry(operationId);
+    this.logger.log(
+      `Retry completed: operationId=${operationId}, retried=${result.retried}`,
+      'ORCESTRATOR',
+    );
+    return result;
+  }
+
+  @Get('metrics/:queueName')
+  async getMetrics(
+    @Param('queueName')
+    queueName: 'statement-generation' | 'matematika-calls' | 'maska-calls',
+  ) {
+    this.logger.log(`Get metrics request: queue=${queueName}`, 'ORCESTRATOR');
+    const result = await this.orcestratorService.getMetrics(queueName);
+    this.logger.log(
+      `Metrics response: queue=${queueName}, waiting=${result.waiting}, active=${result.active}`,
+      'ORCESTRATOR',
+    );
+    return result;
+  }
+
+  @Get('result/:operationId')
+  async getResult(@Param('operationId') operationId: string) {
+    this.logger.log(`Get result request: operationId=${operationId}`, 'ORCESTRATOR');
+    const result = await this.orcestratorService.getResult(operationId);
+    this.logger.log(
+      `Result response: operationId=${operationId}, hasData=${!!result}`,
+      'ORCESTRATOR',
+    );
+    return result;
+  }
+
+  // RabbitMQ message handlers
+  @MessagePattern('statement.generate')
+  async handleStatementGenerate(
+    @Payload() dto: GenerateStatementDto,
     @Ctx() context: RmqContext,
   ) {
-    console.log(`
-╔═══════════════════════════════════════════════════════════╗
-║   📨 DATA RECEIVED FROM RABBITMQ BROKER                   ║
-╠═══════════════════════════════════════════════════════════╣
-║   User name: ${user.name.padEnd(35)}                      ║
-║   User age:  ${user.age.toString().padEnd(35)}            ║
-╚═══════════════════════════════════════════════════════════╝
-    `);
-
+    this.logger.log(
+      `RabbitMQ message received: statement.generate, company=${dto.companyId}`,
+      'ORCESTRATOR',
+    );
+    const result = await this.orcestratorService.generate(dto);
+    this.logger.log(
+      `RabbitMQ message processed: operationId=${result.operationId}`,
+      'ORCESTRATOR',
+    );
     const channel = context.getChannelRef();
     const message = context.getMessage();
-
     channel.ack(message);
-
-    return { status: 'processed', received: user };
-  }
-
-  // ========== НОВЫЙ РОУТ ==========
-  @Post('calculate')
-  async calculate(
-    @Body()
-    data: {
-      numbers: number[];
-      operation: 'sum' | 'multiply' | 'average';
-    },
-  ) {
-    console.log(`📤 Sending calculation request to RabbitMQ:`, data);
-
-    return await this.sharedClient.send('math.calculate', data).toPromise();
-  }
-
-  @MessagePattern('math.calculate')
-  async handleCalculation(
-    @Payload()
-    data: { numbers: number[]; operation: 'sum' | 'multiply' | 'average' },
-    @Ctx() context: RmqContext,
-  ) {
-    console.log(`📨 Received calculation request:`, data);
-
-    let result: number;
-    let operationName: string;
-
-    switch (data.operation) {
-      case 'sum':
-        result = data.numbers.reduce((acc, num) => acc + num, 0);
-        operationName = 'Sum';
-        break;
-      case 'multiply':
-        result = data.numbers.reduce((acc, num) => acc * num, 1);
-        operationName = 'Multiplication';
-        break;
-      case 'average':
-        result =
-          data.numbers.reduce((acc, num) => acc + num, 0) / data.numbers.length;
-        operationName = 'Average';
-        break;
-      default:
-        throw new Error(`Unknown operation: ${data.operation}`);
-    }
-
-    console.log(`
-╔═══════════════════════════════════════════════════════════╗
-║   🧮 CALCULATION RESULT FROM RABBITMQ BROKER             ║
-╠═══════════════════════════════════════════════════════════╣
-║   Operation: ${operationName.padEnd(35)}║
-║   Numbers:   ${data.numbers.join(', ').padEnd(35)}║
-║   Result:    ${result.toString().padEnd(35)}║
-╚═══════════════════════════════════════════════════════════╝
-    `);
-
-    const channel = context.getChannelRef();
-    const originalMessage = context.getMessage();
-    channel.ack(originalMessage);
-
-    return {
-      status: 'calculated',
-      operation: data.operation,
-      numbers: data.numbers,
-      result,
-      timestamp: new Date(),
-    };
+    return result;
   }
 }

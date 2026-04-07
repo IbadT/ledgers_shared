@@ -1,10 +1,9 @@
 // src/modules/date-calculation/date-calculation.service.ts
 
 import { Injectable } from '@nestjs/common';
-import { DatePatternType, ShiftRule } from '../generated/prisma/enums';
+import { DatePatternType, ShiftRule } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-// import type { PrismaService } from '../../shared/prisma/prisma.service';
-// import { DatePatternType, ShiftRule } from '@prisma/client';
+import { AppLogger } from '../shared/logger.service';
 
 interface DatePatternInput {
   category: string;
@@ -30,7 +29,10 @@ interface DatePattern {
 export class DateCalculationService {
   private readonly US_HOLIDAYS = ['01-01', '07-04', '12-25'];
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly logger: AppLogger,
+  ) {}
 
   async calculateDates(
     companyId: string,
@@ -38,9 +40,14 @@ export class DateCalculationService {
     categories: DatePatternInput[],
   ): Promise<CalculatedDate[]> {
     const [year, month] = period.split('-').map(Number);
+    this.logger.log(
+      `[calculateDates] Calculating dates: companyId=${companyId}, period=${period}, categories=${categories.length}`,
+      'DATE-CALC',
+    );
     const result: CalculatedDate[] = [];
 
     for (const { category } of categories) {
+      this.logger.debug(`[calculateDates] Processing category: ${category}`, 'DATE-CALC');
       const existingPattern = await this.getExistingPattern(
         companyId,
         category,
@@ -50,9 +57,11 @@ export class DateCalculationService {
       let pattern: 'fixed' | 'floating';
 
       if (existingPattern) {
+        this.logger.debug(`[calculateDates] Using existing pattern for ${category}`, 'DATE-CALC');
         calculatedDate = this.applyPattern(existingPattern, year, month);
         pattern = existingPattern.fixedDayOfMonth ? 'fixed' : 'floating';
       } else {
+        this.logger.debug(`[calculateDates] Generating new pattern for ${category}`, 'DATE-CALC');
         const newPattern = this.generateRandomPattern(category, year, month);
         calculatedDate = this.applyPattern(newPattern, year, month);
         pattern = newPattern.fixedDayOfMonth ? 'fixed' : 'floating';
@@ -74,6 +83,10 @@ export class DateCalculationService {
       });
     }
 
+    this.logger.log(
+      `[calculateDates] Completed: companyId=${companyId}, period=${period}, calculated=${result.length} dates`,
+      'DATE-CALC',
+    );
     return result;
   }
 
@@ -247,28 +260,54 @@ export class DateCalculationService {
     category: string,
     period: string,
   ): Promise<Date | null> {
+    this.logger.debug(
+      `[getDateForCategory] Getting date: companyId=${companyId}, category=${category}, period=${period}`,
+      'DATE-CALC',
+    );
     const patterns = await this.calculateDates(companyId, period, [
       { category, type: 'contractor' },
     ]);
-    return patterns[0]?.date || null;
+    const date = patterns[0]?.date || null;
+    this.logger.debug(
+      `[getDateForCategory] Result: date=${date}`,
+      'DATE-CALC',
+    );
+    return date;
   }
 
   async hasPattern(companyId: string, category: string): Promise<boolean> {
+    this.logger.debug(
+      `[hasPattern] Checking pattern: companyId=${companyId}, category=${category}`,
+      'DATE-CALC',
+    );
     const count = await this.prisma.datePattern.count({
       where: {
         companyId,
         category,
       },
     });
-    return count > 0;
+    const hasPattern = count > 0;
+    this.logger.debug(
+      `[hasPattern] Result: ${hasPattern}`,
+      'DATE-CALC',
+    );
+    return hasPattern;
   }
 
   async resetPattern(companyId: string, category: string): Promise<void> {
+    this.logger.log(
+      `[resetPattern] Resetting pattern: companyId=${companyId}, category=${category}`,
+      'DATE-CALC',
+    );
     await this.prisma.datePattern.deleteMany({
       where: {
         companyId,
         category,
       },
     });
+    this.logger.log(
+      `[resetPattern] Pattern reset: companyId=${companyId}, category=${category}`,
+      'DATE-CALC',
+    );
   }
 }
