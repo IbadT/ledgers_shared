@@ -1,0 +1,370 @@
+generator client {
+  provider = "prisma-client"
+  output   = "./generated"
+  engineType = "nodeFs"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ==========================================
+// 1. УПРАВЛЕНИЕ ОПЕРАЦИЯМИ (Job Manager)
+// ==========================================
+
+model OrchestrationJob {
+  id          String @id @default(uuid())
+  operationId String @unique // hash от companyId + accountNumber + dateRange
+
+  // Идентификация
+  companyId     String
+  companyName   String?
+  accountNumber String
+
+  // Параметры запроса
+  startDate   DateTime // Первый день первого месяца
+  monthsCount Int
+  parameters  Json // Массив MonthlyParameters[]
+
+  // Статус и прогресс
+  status       JobStatus @default(PENDING)
+  currentMonth Int       @default(0) // Индекс текущего месяца (0-based)
+  totalMonths  Int
+
+  // Результат
+  result       Json? // AggregatedResult при завершении
+  errorMessage String?
+  errorDetails Json?
+
+  // Checkpoint для восстановления
+  lastSuccessfulMonth Json? // Сериализованный MonthResult последнего успешного
+
+  // Метаданные
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  completedAt DateTime?
+
+  // Связи
+  monthResults MonthResult[]
+
+  @@index([companyId, accountNumber])
+  @@index([status, createdAt])
+  @@index([operationId])
+  @@map("orchestration_jobs")
+}
+
+enum JobStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+// ==========================================
+// 2. РЕЗУЛЬТАТЫ ПО МЕСЯЦАМ
+// ==========================================
+
+model MonthResult {
+  id String @id @default(uuid())
+
+  // Связь с Job
+  jobId String
+  job   OrchestrationJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  // Период
+  period      String // "2025-01" (YYYY-MM)
+  periodStart DateTime // 2025-01-01
+  periodEnd   DateTime // 2025-01-31
+
+  // Балансы
+  initialBalance Decimal @db.Decimal(15, 2)
+  closingBalance Decimal @db.Decimal(15, 2)
+
+  // Транзакции (готовый результат от Maska)
+  transactions Json // Transaction[]
+
+  // Контрагенты, использованные в этом месяце
+  usedClients     Json // string[] — имена клиентов
+  usedContractors Json // string[] — имена подрядчиков
+
+  // Метаданные генерации
+  matematikaParams Json? // Что было отправлено в Matematika
+  forwardInfoSent  Json? // ForwardingInfo для следующего месяца
+
+  createdAt DateTime @default(now())
+
+  @@unique([jobId, period])
+  @@index([period])
+  @@map("month_results")
+}
+
+// ==========================================
+// 3. СОСТОЯНИЕ КОНТРАГЕНТОВ (требование 82, 83, 84)
+// ==========================================
+
+// Главная сущность — хранит актуальное состояние по компании
+model CounterpartyState {
+  id String @id @default(uuid())
+
+  // Идентификация
+  companyId String
+  type      CounterpartyType // CLIENT или CONTRACTOR
+
+  // Список контрагентов с метаданными
+  // Структура: { name, category, isGreen, usageCount, lastUsedPeriod, isActive }
+  counterparties Json
+
+  // Версионирование для отслеживания изменений
+  version Int @default(1)
+
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+
+  @@unique([companyId, type])
+  @@index([companyId])
+  @@map("counterparty_states")
+}
+
+enum CounterpartyType {
+  CLIENT // Клиенты (доходы) — 60% повторяемость
+  CONTRACTOR // Подрядчики (расходы) — 70% повторяемость
+}
+
+// История использования для аудита и аналитики
+model CounterpartyUsageHistory {
+  id String @id @default(uuid())
+
+  companyId String
+  type      CounterpartyType
+  period    String // "2025-01"
+
+  // Кто использовался
+  usedNames Json // string[]
+
+  // Кто был выбран как новый (не из истории)
+  newNames Json // string[]
+
+  // Зеленые категории в этом периоде
+  greenCategories Json // { category: string, counterparty: string }[]
+
+  createdAt DateTime @default(now())
+
+  @@index([companyId, period])
+  @@index([companyId, type, period])
+  @@map("counterparty_usage_history")
+}
+
+// ==========================================
+// 4. ЗЕЛЕНЫЕ КАТЕГОРИИ (требование 83)
+// ==========================================
+
+// Фиксированные контрагенты для постоянных категорий
+model GreenCategoryAssignment {
+  id String @id @default(uuid())
+
+  companyId String
+  category  String // "LEASE", "MOBILE", "UTILITIES", "INTERNET" и т.д.
+
+  // Зафиксированный контрагент
+  counterpartyName    String
+  counterpartyDetails Json? // Доп. данные (ИНН, адрес и т.д.)
+
+  // Когда и в каком периоде установлен
+  establishedPeriod String // "2025-01" — первый месяц генерации
+  establishedAt     DateTime @default(now())
+
+  // Флаги
+  isActive Boolean @default(true)
+
+  updatedAt DateTime @updatedAt
+
+  @@unique([companyId, category])
+  @@index([companyId])
+  @@map("green_category_assignments")
+}
+
+// ==========================================
+// 5. ПАТТЕРНЫ ДАТ (требование 25, 83)
+// ==========================================
+
+model DatePattern {
+  id String @id @default(uuid())
+
+  companyId String
+  category  String // "SUBSCRIPTION_SOFTWARE", "PAYROLL" и т.д.
+
+  // Тип паттерна
+  patternType DatePatternType
+
+  // Для плавающих дат (3-й вторник)
+  dayOfWeek   Int? // 0-6 (воскресенье-суббота)
+  weekOfMonth Int? // 1-4 (первая-четвертая неделя)
+
+  // Для фиксированных дат (15-е число)
+  fixedDayOfMonth Int? // 1-31
+
+  // Правило сдвига при выпадании на выходной
+  shiftRule ShiftRule @default(NEXT_WEEKDAY) // NEXT_WEEKDAY, PREV_WEEKDAY, NO_SHIFT
+
+  // В каком периоде впервые установлен (для отслеживания "случайно выбрано в первой выписке")
+  establishedPeriod String
+  establishedAt     DateTime @default(now())
+
+  updatedAt DateTime @updatedAt
+
+  @@unique([companyId, category])
+  @@index([companyId])
+  @@map("date_patterns")
+}
+
+enum DatePatternType {
+  FLOATING_NTH_WEEKDAY // n-й день недели (3-й вторник)
+  FIXED_DAY_OF_MONTH // Фиксированное число (15-е)
+  LAST_DAY_OF_MONTH // Последний день месяца
+  FIRST_WEEKDAY_OF_MONTH // Первый рабочий день
+}
+
+enum ShiftRule {
+  NEXT_WEEKDAY // Сдвинуть на следующий будний день
+  PREV_WEEKDAY // Сдвинуть на предыдущий будний день
+  NO_SHIFT // Не сдвигать (если допустимо)
+}
+
+// ==========================================
+// 6. БАЛАНСЫ И CHECKPOINT'Ы (требование 80, 81)
+// ==========================================
+
+// Текущее состояние баланса по счету
+model AccountBalanceState {
+  id String @id @default(uuid())
+
+  companyId     String
+  accountNumber String
+
+  // Последний известный баланс
+  lastPeriod         String // "2025-03"
+  lastClosingBalance Decimal @db.Decimal(15, 2)
+
+  // Когда обновлено
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+
+  @@unique([companyId, accountNumber])
+  @@index([companyId])
+  @@map("account_balance_states")
+}
+
+// История балансов для аудита
+model BalanceHistory {
+  id String @id @default(uuid())
+
+  companyId     String
+  accountNumber String
+  period        String // "2025-01"
+
+  initialBalance Decimal @db.Decimal(15, 2)
+  closingBalance Decimal @db.Decimal(15, 2)
+
+  // Откуда взят initialBalance
+  source BalanceSource @default(PREVIOUS_MONTH)
+
+  // Если USER_OVERRIDE — сохраняем значение
+  userOverrideValue Decimal? @db.Decimal(15, 2)
+
+  jobId String? // Связь с операцией
+
+  createdAt DateTime @default(now())
+
+  @@unique([companyId, accountNumber, period])
+  @@index([companyId, accountNumber])
+  @@map("balance_history")
+}
+
+enum BalanceSource {
+  PREVIOUS_MONTH // От предыдущего месяца
+  USER_OVERRIDE // Пользователь переопределил
+  FIRST_GENERATION // Первичная генерация (начальный баланс из параметров)
+}
+
+// ==========================================
+// 7. ФИКСИРОВАННЫЕ СУММЫ (требование 85)
+// ==========================================
+
+// Базовые суммы для категорий с вариацией
+model FixedAmountState {
+  id String @id @default(uuid())
+
+  companyId String
+  category  String // "MOBILE", "UTILITIES", "LEASE", "INTERNET"
+
+  // Базовая сумма (установлена в первом месяце)
+  baseAmount Decimal @db.Decimal(15, 2)
+
+  // Параметры вариации
+  variationPercent Decimal @default(15.00) // ±15%
+  isFixedExact     Boolean @default(false) // true для лизинга (1:1), false для мобильной связи
+
+  // В каком периоде установлена базовая сумма
+  establishedPeriod String
+  establishedAt     DateTime @default(now())
+
+  // История значений по месяцам (для аудита)
+  history Json? // [{ period, amount, seed }]
+
+  updatedAt DateTime @updatedAt
+
+  @@unique([companyId, category])
+  @@index([companyId])
+  @@map("fixed_amount_states")
+}
+
+// ==========================================
+// 8. КОНФИГУРАЦИЯ КОМПАНИИ (для справочников)
+// ==========================================
+
+// Доступные контрагенты из конфига (для выбора новых)
+model AvailableCounterparty {
+  id String @id @default(uuid())
+
+  // Может быть глобальным или привязанным к компании
+  companyId String? // null = глобальный пул
+  type      CounterpartyType
+
+  name     String
+  category String // Категория расхода/дохода
+
+  // Данные для генерации
+  defaultAmountMin Decimal? @db.Decimal(15, 2)
+  defaultAmountMax Decimal? @db.Decimal(15, 2)
+
+  // Метаданные
+  isActive Boolean @default(true)
+  priority Int     @default(0) // Приоритет при случайном выборе
+
+  createdAt DateTime @default(now())
+
+  @@index([companyId, type, category])
+  @@index([type, category])
+  @@map("available_counterparties")
+}
+
+// ==========================================
+// 9. ВАЛИДАЦИЯ И ОШИБКИ
+// ==========================================
+
+model ValidationError {
+  id String @id @default(uuid())
+
+  jobId       String
+  monthPeriod String?
+
+  errorType String // BALANCE_MISMATCH, MISSING_PATTERN и т.д.
+  message   String
+  details   Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([jobId])
+  @@map("validation_errors")
+}

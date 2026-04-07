@@ -3,9 +3,12 @@ import { ClientsModule, Transport } from '@nestjs/microservices';
 import { OrcestratorController } from './orcestrator.controller';
 import { OrcestratorService } from './orcestrator.service';
 import { ConfigModule, ConfigService } from '@nestjs/config';
+import { PrismaService } from '../prisma/prisma.service';
+import { QueueModule } from '../queue/queue.module';
 
 @Module({
   imports: [
+    QueueModule,
     ClientsModule.registerAsync([
       {
         name: 'SHARED_SERVICE',
@@ -23,6 +26,6 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
     ]),
   ],
   controllers: [OrcestratorController],
-  providers: [OrcestratorService],
+  providers: [OrcestratorService, PrismaService],
 })
 export class OrcestratorModule {}
