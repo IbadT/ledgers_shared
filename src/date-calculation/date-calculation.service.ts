@@ -135,12 +135,12 @@ export class DateCalculationService {
     }
 
     if (lastDayCategories.includes(category)) {
-      const lastDay = new Date(year, month, 0).getDate();
       return {
-        patternType: 'FIXED_DAY_OF_MONTH' as DatePatternType,
+        patternType: 'LAST_DAY_OF_MONTH' as DatePatternType,
         dayOfWeek: 0,
         weekOfMonth: 0,
-        fixedDayOfMonth: lastDay,
+        // Используем 99 как маркер "последний день месяца" — applyPattern пересчитает динамически
+        fixedDayOfMonth: 99,
         shiftRule: 'PREV_WEEKDAY',
       };
     }
@@ -162,7 +162,16 @@ export class DateCalculationService {
     month: number,
   ): Date {
     if (pattern.fixedDayOfMonth) {
-      return new Date(year, month - 1, pattern.fixedDayOfMonth);
+      // Маркер 99 = "последний день месяца" — пересчитываем динамически
+      if (pattern.fixedDayOfMonth === 99) {
+        const lastDay = new Date(year, month, 0).getDate();
+        return new Date(year, month - 1, lastDay);
+      }
+      // Фикс: не позволяем дню переполниться в следующий месяц
+      // Например, 31 февраля → 28/29 февраля, не 3 марта
+      const lastDayOfMonth = new Date(year, month, 0).getDate();
+      const day = Math.min(pattern.fixedDayOfMonth, lastDayOfMonth);
+      return new Date(year, month - 1, day);
     }
 
     return this.getNthWeekdayOfMonth(

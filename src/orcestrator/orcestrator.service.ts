@@ -266,7 +266,7 @@ export class OrcestratorService {
     const hash = crypto
       .createHash('sha256')
       .update(
-        `${dto.companyId}_${dto.accountNumber}_${dto.startDate}_${dto.monthsCount}`,
+        `${dto.companyId}_${dto.accountNumber}_${dto.startDate}_${dto.monthsCount}_${JSON.stringify(dto.parameters)}`,
       )
       .digest('hex')
       .slice(0, 16);

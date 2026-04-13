@@ -19,6 +19,10 @@ export interface GenerateMonthJobData {
   initialBalance: number;
   parameters: MonthlyParameters;
   previousPeriod?: string;
+  // Дополнительные поля для retry-идемпотентности и цепочки месяцев
+  _retryState?: unknown;
+  _startDate?: string;
+  _parameters?: MonthlyParameters[];
 }
 
 export interface MatematikaCallData {
@@ -112,80 +116,107 @@ export class QueueService {
     parameters: MonthlyParameters[],
   ): Promise<string> {
     this.logger.log(
-      `[createStatementGenerationFlow] Creating flow: operationId=${operationId}, months=${monthsCount}`,
+      `[createStatementGenerationFlow] Creating sequential flow: operationId=${operationId}, months=${monthsCount}`,
       'QUEUE',
     );
-    const flowJobs: FlowJob[] = [];
-    let previousJobId: string | undefined;
 
-    for (let i = 0; i < monthsCount; i++) {
-      const periodDate = new Date(
-        startDate.getFullYear(),
-        startDate.getMonth() + i,
-        1,
-      );
-      const period = this.formatPeriod(periodDate);
-      const jobId = `${operationId}#${period}`;
-
-      const flowJob: FlowJob = {
-        name: 'generate-month',
-        queueName: 'statement-generation',
-        opts: {
-          jobId,
-          priority: monthsCount - i,
-        },
-        data: {
-          operationId,
-          companyId,
-          companyName,
-          accountNumber,
-          period,
-          monthIndex: i,
-          totalMonths: monthsCount,
-          initialBalance: 0,
-          parameters: parameters[i] || parameters[parameters.length - 1],
-          previousPeriod:
-            i > 0
-              ? this.formatPeriod(
-                  new Date(
-                    startDate.getFullYear(),
-                    startDate.getMonth() + i - 1,
-                    1,
-                  ),
-                )
-              : undefined,
-        } satisfies GenerateMonthJobData,
-      };
-
-      if (previousJobId) {
-        flowJob.opts!.parent = {
-          id: previousJobId,
-          queue: 'statement-generation',
-        };
-      }
-
-      flowJobs.push(flowJob);
-      previousJobId = jobId;
-    }
-
-    this.logger.debug(
-      `[createStatementGenerationFlow] Adding ${flowJobs.length} jobs to flow`,
-      'QUEUE',
+    // ФИКС: Вместо FlowProducer с parent-зависимостями (который не гарантирует последовательность),
+    // добавляем только ПЕРВЫЙ месяц. Каждый следующий добавляется процессором по завершении предыдущего.
+    const firstPeriodDate = new Date(
+      startDate.getFullYear(),
+      startDate.getMonth(),
+      1,
     );
-    const flow = await this.flowProducer.add({
-      name: 'statement-generation-flow',
-      queueName: 'statement-generation',
-      opts: {
-        jobId: `flow#${operationId}`,
-      },
-      children: flowJobs,
+    const firstPeriod = this.formatPeriod(firstPeriodDate);
+    const firstJobId = `${operationId}#${firstPeriod}`;
+
+    const firstJobData: GenerateMonthJobData = {
+      operationId,
+      companyId,
+      companyName,
+      accountNumber,
+      period: firstPeriod,
+      monthIndex: 0,
+      totalMonths: monthsCount,
+      initialBalance: 0,
+      parameters: parameters[0] || parameters[parameters.length - 1],
+      previousPeriod: undefined,
+      // Дополнительные данные для построения цепочки
+      _startDate: startDate.toISOString(),
+      _parameters: parameters,
+    } as GenerateMonthJobData & { _startDate: string; _parameters: MonthlyParameters[] };
+
+    await this.generationQueue.add('generate-month', firstJobData, {
+      jobId: firstJobId,
+      priority: 1, // Первый месяц — высший приоритет (чем меньше число, тем выше приоритет в BullMQ)
     });
 
     this.logger.log(
-      `[createStatementGenerationFlow] Flow created: flowId=${flow.job.id}`,
+      `[createStatementGenerationFlow] First month added: jobId=${firstJobId}, operationId=${operationId}`,
       'QUEUE',
     );
-    return flow.job.id!;
+    return `flow#${operationId}`;
+  }
+
+  /**
+   * Добавляет следующий месяц в цепочку (вызывается из процессора по завершении текущего месяца)
+   */
+  async addNextMonthJob(
+    operationId: string,
+    companyId: string,
+    companyName: string,
+    accountNumber: string,
+    startDate: Date,
+    currentMonthIndex: number,
+    totalMonths: number,
+    parameters: MonthlyParameters[],
+  ): Promise<Job<GenerateMonthJobData> | null> {
+    const nextMonthIndex = currentMonthIndex + 1;
+
+    if (nextMonthIndex >= totalMonths) {
+      this.logger.log(
+        `[addNextMonthJob] Chain complete: operationId=${operationId}, totalMonths=${totalMonths}`,
+        'QUEUE',
+      );
+      return null;
+    }
+
+    const nextPeriodDate = new Date(
+      startDate.getFullYear(),
+      startDate.getMonth() + nextMonthIndex,
+      1,
+    );
+    const nextPeriod = this.formatPeriod(nextPeriodDate);
+    const previousPeriod = this.formatPeriod(
+      new Date(startDate.getFullYear(), startDate.getMonth() + currentMonthIndex, 1),
+    );
+    const nextJobId = `${operationId}#${nextPeriod}`;
+
+    this.logger.log(
+      `[addNextMonthJob] Adding month ${nextMonthIndex + 1}/${totalMonths}: jobId=${nextJobId}`,
+      'QUEUE',
+    );
+
+    const nextJobData: GenerateMonthJobData = {
+      operationId,
+      companyId,
+      companyName,
+      accountNumber,
+      period: nextPeriod,
+      monthIndex: nextMonthIndex,
+      totalMonths,
+      initialBalance: 0,
+      parameters: parameters[nextMonthIndex] || parameters[parameters.length - 1],
+      previousPeriod,
+      // Пробрасываем данные для продолжения цепочки
+      _startDate: startDate.toISOString(),
+      _parameters: parameters,
+    } as GenerateMonthJobData & { _startDate: string; _parameters: MonthlyParameters[] };
+
+    return this.generationQueue.add('generate-month', nextJobData, {
+      jobId: nextJobId,
+      priority: nextMonthIndex + 1, // Чем меньше число, тем выше приоритет в BullMQ
+    });
   }
 
   async addMonthGenerationJob(
@@ -197,7 +228,7 @@ export class QueueService {
     );
     return this.generationQueue.add('generate-month', data, {
       jobId: `${data.operationId}#${data.period}`,
-      priority: data.totalMonths - data.monthIndex,
+      priority: data.monthIndex + 1, // Чем меньше число, тем выше приоритет в BullMQ
     });
   }
 

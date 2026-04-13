@@ -24,8 +24,19 @@ interface CounterpartyItem {
   isGreen: boolean;
 }
 
+// Интерфейс для хранения промежуточных результатов между retry-попытками (идемпотентность)
+interface RetryState {
+  step1_initialBalance?: number;
+  step2_counterparties?: CounterpartyItem[];
+  step3_datePatterns?: any[];
+  step3_uniqueCategories?: any[];
+  step4_forwardInfo?: any[];
+  step5_matematikaResult?: { finalBalance: number; transactions: unknown[] };
+  step6_maskaResult?: unknown[];
+}
+
 @Processor('statement-generation', {
-  concurrency: 3,
+  concurrency: 1,
   limiter: {
     max: 10,
     duration: 1000,
@@ -76,6 +87,17 @@ export class MonthGenerationProcessor extends WorkerHost {
       previousPeriod,
     } = job.data;
 
+    // ИДЕМПОТЕНТНОСТЬ RETRY: Получаем или инициализируем состояние retry
+    const extendedJobData = job.data as GenerateMonthJobData & { _retryState?: RetryState };
+    const retryState: RetryState = extendedJobData._retryState || {};
+
+    if (job.attemptsMade > 0) {
+      this.logger.log(
+        `[process] Retry attempt ${job.attemptsMade} for job ${job.id}, period=${period}`,
+        'MONTH-PROCESSOR',
+      );
+    }
+
     // 1. Определяем начальный баланс
     await job.updateProgress({
       step: 1,
@@ -83,13 +105,21 @@ export class MonthGenerationProcessor extends WorkerHost {
       phase: 'determining-balance',
     });
 
-    const initialBalance = await this.balanceService.getInitialBalance(
-      companyId,
-      accountNumber,
-      period,
-      previousPeriod,
-      parameters.userOverrides?.initialBalance,
-    );
+    let initialBalance: number;
+    if (retryState.step1_initialBalance !== undefined) {
+      initialBalance = retryState.step1_initialBalance;
+      this.logger.debug(`[process] Using cached initialBalance: ${initialBalance}`, 'MONTH-PROCESSOR');
+    } else {
+      initialBalance = await this.balanceService.getInitialBalance(
+        companyId,
+        accountNumber,
+        period,
+        previousPeriod,
+        parameters.userOverrides?.initialBalance,
+      );
+      retryState.step1_initialBalance = initialBalance;
+      await job.updateData({ ...job.data, _retryState: retryState });
+    }
 
     // 2. Выбор контрагентов с правилами 60%/70%
     await job.updateProgress({
@@ -98,27 +128,63 @@ export class MonthGenerationProcessor extends WorkerHost {
       phase: 'selecting-counterparties',
     });
 
-    const counterparties = await this.counterpartyService.selectForMonth(
-      companyId,
-      period,
-      monthIndex,
-      previousPeriod,
-    );
+    let counterparties: CounterpartyItem[];
+    if (retryState.step2_counterparties) {
+      counterparties = retryState.step2_counterparties;
+      this.logger.debug(
+        `[process] Using cached counterparties: ${counterparties.length} items`,
+        'MONTH-PROCESSOR',
+      );
+    } else {
+      counterparties = await this.counterpartyService.selectForMonth(
+        companyId,
+        period,
+        monthIndex,
+        previousPeriod,
+      );
+      retryState.step2_counterparties = counterparties;
+      await job.updateData({ ...job.data, _retryState: retryState });
+    }
 
     // 3. Расчет дат с паттернами
     await job.updateProgress({ step: 3, total: 6, phase: 'calculating-dates' });
 
-    const datePatterns = await this.dateCalcService.calculateDates(
-      companyId,
-      period,
-      counterparties.map((c) => ({ category: c.category, type: c.type })),
-    );
+    let uniqueCategories: any[];
+    let datePatterns: any[];
+    if (retryState.step3_datePatterns && retryState.step3_uniqueCategories) {
+      uniqueCategories = retryState.step3_uniqueCategories;
+      datePatterns = retryState.step3_datePatterns;
+      this.logger.debug(`[process] Using cached datePatterns`, 'MONTH-PROCESSOR');
+    } else {
+      // Дедупликация категорий — одна дата на категорию, независимо от количества контрагентов
+      uniqueCategories = Array.from(
+        new Map(
+          counterparties.map((c) => [c.category, { category: c.category, type: c.type }]),
+        ).values(),
+      );
+
+      datePatterns = await this.dateCalcService.calculateDates(
+        companyId,
+        period,
+        uniqueCategories,
+      );
+      retryState.step3_uniqueCategories = uniqueCategories;
+      retryState.step3_datePatterns = datePatterns;
+      await job.updateData({ ...job.data, _retryState: retryState });
+    }
 
     // 4. Подготовка forward info
-    const forwardInfo =
-      monthIndex > 0
-        ? await this.getForwardingInfo(companyId, previousPeriod!)
-        : undefined;
+    let forwardInfo: any[] | undefined;
+    if (retryState.step4_forwardInfo !== undefined) {
+      forwardInfo = retryState.step4_forwardInfo;
+    } else {
+      forwardInfo =
+        monthIndex > 0
+          ? await this.getForwardingInfo(companyId, previousPeriod!)
+          : undefined;
+      retryState.step4_forwardInfo = forwardInfo;
+      await job.updateData({ ...job.data, _retryState: retryState });
+    }
 
     // 5. Вызов Matematika
     await job.updateProgress({
@@ -127,28 +193,44 @@ export class MonthGenerationProcessor extends WorkerHost {
       phase: 'calling-matematika',
     });
 
-    const matematikaResult = await this.callMatematika(
-      operationId,
-      period,
-      initialBalance,
-      counterparties,
-      datePatterns,
-      forwardInfo,
-      parameters,
-    );
+    let matematikaResult: { finalBalance: number; transactions: unknown[] };
+    if (retryState.step5_matematikaResult) {
+      matematikaResult = retryState.step5_matematikaResult;
+      this.logger.debug(`[process] Using cached matematikaResult`, 'MONTH-PROCESSOR');
+    } else {
+      matematikaResult = await this.callMatematika(
+        operationId,
+        period,
+        initialBalance,
+        counterparties,
+        datePatterns,
+        forwardInfo,
+        parameters,
+      );
+      retryState.step5_matematikaResult = matematikaResult;
+      await job.updateData({ ...job.data, _retryState: retryState });
+    }
 
     // 6. Вызов Maska
     await job.updateProgress({ step: 5, total: 6, phase: 'calling-maska' });
 
-    const finalTransactions = await this.callMaska(
-      operationId,
-      period,
-      matematikaResult.transactions,
-      {
-        companyName,
-        accountNumber,
-      },
-    );
+    let finalTransactions: unknown[];
+    if (retryState.step6_maskaResult) {
+      finalTransactions = retryState.step6_maskaResult;
+      this.logger.debug(`[process] Using cached maskaResult`, 'MONTH-PROCESSOR');
+    } else {
+      finalTransactions = await this.callMaska(
+        operationId,
+        period,
+        matematikaResult.transactions,
+        {
+          companyName,
+          accountNumber,
+        },
+      );
+      retryState.step6_maskaResult = finalTransactions;
+      await job.updateData({ ...job.data, _retryState: retryState });
+    }
 
     // 7. Сохранение результата
     await job.updateProgress({ step: 6, total: 6, phase: 'saving-results' });
@@ -173,7 +255,32 @@ export class MonthGenerationProcessor extends WorkerHost {
       period,
       result.closingBalance,
     );
-    await this.saveCounterpartyUsage(companyId, period, counterparties);
+
+    // ИДЕМПОТЕНТНОСТЬ: Сохраняем контрагентов ТОЛЬКО после успешного завершения всех шагов.
+    // При retry это сохранение будет пропущено, т.к. записи уже существуют.
+    await this.counterpartyService.saveCounterpartySelection(
+      companyId,
+      period,
+      counterparties,
+    );
+
+    // ФИКС: Последовательная обработка месяцев — добавляем следующий месяц по завершении текущего
+    const jobData = job.data as GenerateMonthJobData & { _startDate?: string; _parameters?: any[] };
+    if (jobData._startDate && jobData._parameters) {
+      await this.queueService.addNextMonthJob(
+        operationId,
+        companyId,
+        companyName,
+        accountNumber,
+        new Date(jobData._startDate),
+        monthIndex,
+        totalMonths,
+        jobData._parameters,
+      );
+    }
+
+    // Очищаем retryState после успешного завершения
+    await job.updateData({ ...job.data, _retryState: undefined });
 
     return result;
   }
@@ -350,48 +457,6 @@ export class MonthGenerationProcessor extends WorkerHost {
         usedContractors: result.usedContractors,
       },
     });
-  }
-
-  private async saveCounterpartyUsage(
-    companyId: string,
-    period: string,
-    counterparties: CounterpartyItem[],
-  ): Promise<void> {
-    const clients = counterparties.filter((c) => c.type === 'client');
-    const contractors = counterparties.filter((c) => c.type === 'contractor');
-
-    await this.prisma.$transaction([
-      this.prisma.counterpartyUsageHistory.create({
-        data: {
-          companyId,
-          type: 'CLIENT',
-          period,
-          usedNames: clients.map((c) => c.name),
-          newNames: [],
-          greenCategories: clients
-            .filter((c) => c.isGreen)
-            .map((c) => ({
-              category: c.category,
-              counterparty: c.name,
-            })),
-        },
-      }),
-      this.prisma.counterpartyUsageHistory.create({
-        data: {
-          companyId,
-          type: 'CONTRACTOR',
-          period,
-          usedNames: contractors.map((c) => c.name),
-          newNames: [],
-          greenCategories: contractors
-            .filter((c) => c.isGreen)
-            .map((c) => ({
-              category: c.category,
-              counterparty: c.name,
-            })),
-        },
-      }),
-    ]);
   }
 
   @OnWorkerEvent('completed')

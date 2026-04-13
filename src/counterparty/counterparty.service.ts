@@ -45,6 +45,17 @@ export class CounterpartyService {
       `[selectForMonth] Selecting counterparties: companyId=${companyId}, period=${period}, monthIndex=${monthIndex}`,
       'COUNTERPARTY',
     );
+
+    // ИДЕМПОТЕНТНОСТЬ: Проверяем, есть ли уже сохраненная выборка для этого периода
+    const existingSelection = await this.getExistingSelection(companyId, period);
+    if (existingSelection) {
+      this.logger.log(
+        `[selectForMonth] Returning existing selection: companyId=${companyId}, period=${period}, count=${existingSelection.length}`,
+        'COUNTERPARTY',
+      );
+      return existingSelection;
+    }
+
     const config = await this.getSelectionConfig(companyId);
     const selected: CounterpartySelection[] = [];
 
@@ -76,13 +87,116 @@ export class CounterpartyService {
     selected.push(...contractors);
     this.logger.debug(`[selectForMonth] Selected ${contractors.length} contractors`, 'COUNTERPARTY');
 
-    await this.saveSelection(companyId, period, selected);
+    // Сохранение теперь НЕ вызывается здесь - перенесено в saveCounterpartySelection
+    // для вызова только после успешного завершения обработки месяца
 
     this.logger.log(
       `[selectForMonth] Completed: companyId=${companyId}, period=${period}, totalSelected=${selected.length}`,
       'COUNTERPARTY',
     );
     return selected;
+  }
+
+  /**
+   * Сохраняет выборку контрагентов для периода.
+   * Идемпотентная операция: если данные уже существуют, повторное сохранение пропускается.
+   * Должна вызываться ТОЛЬКО после успешного завершения обработки месяца.
+   */
+  async saveCounterpartySelection(
+    companyId: string,
+    period: string,
+    selected: CounterpartySelection[],
+  ): Promise<void> {
+    // ИДЕМПОТЕНТНОСТЬ: Проверяем, есть ли уже запись в истории
+    const existingHistory = await this.prisma.counterpartyUsageHistory.findFirst({
+      where: {
+        companyId,
+        period,
+      },
+    });
+
+    if (existingHistory) {
+      this.logger.log(
+        `[saveCounterpartySelection] Skipping duplicate save: companyId=${companyId}, period=${period}`,
+        'COUNTERPARTY',
+      );
+      return;
+    }
+
+    this.logger.log(
+      `[saveCounterpartySelection] Saving selection: companyId=${companyId}, period=${period}, count=${selected.length}`,
+      'COUNTERPARTY',
+    );
+    await this.saveSelection(companyId, period, selected);
+  }
+
+  /**
+   * Получает существующую выборку контрагентов для периода из истории.
+   */
+  private async getExistingSelection(
+    companyId: string,
+    period: string,
+  ): Promise<CounterpartySelection[] | null> {
+    const [clientHistory, contractorHistory] = await Promise.all([
+      this.prisma.counterpartyUsageHistory.findFirst({
+        where: {
+          companyId,
+          type: 'CLIENT',
+          period,
+        },
+      }),
+      this.prisma.counterpartyUsageHistory.findFirst({
+        where: {
+          companyId,
+          type: 'CONTRACTOR',
+          period,
+        },
+      }),
+    ]);
+
+    if (!clientHistory && !contractorHistory) {
+      return null;
+    }
+
+    const result: CounterpartySelection[] = [];
+
+    if (clientHistory) {
+      const usedNames = clientHistory.usedNames as string[];
+      const greenCategories = clientHistory.greenCategories as Array<{
+        category: string;
+        counterparty: string;
+      }>;
+
+      for (const name of usedNames) {
+        const greenInfo = greenCategories.find((g) => g.counterparty === name);
+        result.push({
+          name,
+          category: greenInfo?.category || 'general',
+          type: 'client',
+          isGreen: !!greenInfo,
+        });
+      }
+    }
+
+    if (contractorHistory) {
+      const usedNames = contractorHistory.usedNames as string[];
+      const greenCategories = contractorHistory.greenCategories as Array<{
+        category: string;
+        counterparty: string;
+      }>;
+
+      for (const name of usedNames) {
+        const greenInfo = greenCategories.find((g) => g.counterparty === name);
+        result.push({
+          name,
+          category: greenInfo?.category || 'general',
+          type: 'contractor',
+          isGreen: !!greenInfo,
+        });
+      }
+    }
+
+    return result;
   }
 
   private async selectByType(
@@ -195,6 +309,8 @@ export class CounterpartyService {
         type: type === 'client' ? 'CLIENT' : 'CONTRACTOR',
         period: previousPeriod,
       },
+      // Фикс недетерминизма: если есть дубликаты, берем самый свежий
+      orderBy: { createdAt: 'desc' },
     });
 
     if (!history) {
@@ -308,8 +424,8 @@ export class CounterpartyService {
     };
 
     // Вариант 1: Последовательное выполнение (проще, без транзакции)
-    await this.upsertCounterpartyState(companyId, 'CLIENT', clients);
-    await this.upsertCounterpartyState(companyId, 'CONTRACTOR', contractors);
+    await this.upsertCounterpartyState(companyId, 'CLIENT', clients, period);
+    await this.upsertCounterpartyState(companyId, 'CONTRACTOR', contractors, period);
     await this.prisma.counterpartyUsageHistory.create({
       data: clientHistoryData,
     });
@@ -374,6 +490,25 @@ export class CounterpartyService {
   private async getSelectionConfig(
     companyId: string,
   ): Promise<SelectionConfig> {
+    const config = await this.prisma.companyCounterpartyConfig.findUnique({
+      where: { companyId },
+    });
+
+    if (config) {
+      return {
+        clients: {
+          targetCount: config.clientTargetCount,
+          repeatRate: Number(config.clientRepeatRate),
+          variation: Number(config.clientVariation),
+        },
+        contractors: {
+          targetCount: config.contractorTargetCount,
+          repeatRate: Number(config.contractorRepeatRate),
+          variation: Number(config.contractorVariation),
+        },
+      };
+    }
+
     return {
       clients: {
         targetCount: 10,
@@ -425,25 +560,26 @@ export class CounterpartyService {
   ): T[] {
     if (items.length <= count) return items;
 
-    const weights = items.map((i) => i.priority + 1);
-    const totalWeight = weights.reduce((a, b) => a + b, 0);
     const selected: T[] = [];
-    const remainingItems = [...items];
-    const remainingWeights = [...weights];
+    const pool = [...items];
 
-    while (selected.length < count && remainingItems.length > 0) {
+    while (selected.length < count && pool.length > 0) {
+      // Корректный алгоритм roulette wheel selection
+      // priority + 1 чтобы даже при priority=0 был шанс быть выбранным
+      const totalWeight = pool.reduce((sum, item) => sum + item.priority + 1, 0);
       let random = Math.random() * totalWeight;
-      let index = 0;
 
-      while (random > 0 && index < remainingItems.length) {
-        random -= remainingWeights[index];
-        index++;
+      let selectedIndex = 0;
+      for (let i = 0; i < pool.length; i++) {
+        random -= pool[i].priority + 1;
+        if (random <= 0) {
+          selectedIndex = i;
+          break;
+        }
       }
 
-      const actualIndex = Math.min(index - 1, remainingItems.length - 1);
-      selected.push(remainingItems[actualIndex]);
-      remainingItems.splice(actualIndex, 1);
-      remainingWeights.splice(actualIndex, 1);
+      selected.push(pool[selectedIndex]);
+      pool.splice(selectedIndex, 1);
     }
 
     return selected;
@@ -502,6 +638,7 @@ export class CounterpartyService {
     companyId: string,
     type: 'CLIENT' | 'CONTRACTOR',
     counterparties: CounterpartySelection[],
+    period: string,
   ): Promise<void> {
     const existing = await this.prisma.counterpartyState.findUnique({
       where: { companyId_type: { companyId, type } },
@@ -512,7 +649,7 @@ export class CounterpartyService {
       category: c.category,
       isGreen: c.isGreen,
       usageCount: 1,
-      lastUsedPeriod: new Date().toISOString().slice(0, 7),
+      lastUsedPeriod: period,
     }));
 
     if (existing) {
@@ -527,13 +664,21 @@ export class CounterpartyService {
       const updated = existingList.map((e) => {
         const match = counterparties.find((c) => c.name === e.name);
         if (match) {
+          // Активный контрагент: обновляем категорию, isGreen, счетчик
           return {
             ...e,
+            category: match.category,
+            isGreen: match.isGreen,
             usageCount: e.usageCount + 1,
-            lastUsedPeriod: new Date().toISOString().slice(0, 7),
+            lastUsedPeriod: period,
           };
         }
-        return e;
+        // Неактивный контрагент: сбрасываем isGreen, сохраняем остальные данные
+        // Это предотвращает "заморозку" isGreen=true для неиспользуемых контрагентов
+        return {
+          ...e,
+          isGreen: false,
+        };
       });
 
       const newOnes = newCounterparties.filter(

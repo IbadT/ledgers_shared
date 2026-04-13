@@ -350,7 +350,35 @@ model AvailableCounterparty {
 }
 
 // ==========================================
-// 9. ВАЛИДАЦИЯ И ОШИБКИ
+// 9. КОНФИГУРАЦИЯ КОЛИЧЕСТВА КОНТРАГЕНТОВ
+// ==========================================
+
+model CompanyCounterpartyConfig {
+  id String @id @default(uuid())
+
+  companyId String @unique
+
+  // Целевое количество клиентов (доходы)
+  clientTargetCount Int @default(10)
+
+  // Целевое количество подрядчиков (расходы)
+  contractorTargetCount Int @default(15)
+
+  // Параметры повторяемости (можно переопределить per company)
+  clientRepeatRate    Decimal @default(0.60) @db.Decimal(3, 2)
+  clientVariation     Decimal @default(0.10) @db.Decimal(3, 2)
+  contractorRepeatRate Decimal @default(0.70) @db.Decimal(3, 2)
+  contractorVariation Decimal @default(0.10) @db.Decimal(3, 2)
+
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+
+  @@index([companyId])
+  @@map("company_counterparty_configs")
+}
+
+// ==========================================
+// 10. ВАЛИДАЦИЯ И ОШИБКИ
 // ==========================================
 
 model ValidationError {
